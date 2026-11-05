@@ -3,17 +3,22 @@
 # Downloads npm dependencies inside its own staging directory. Never starts Wiki.js.
 set -euo pipefail
 
-task_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-checkout="${1:-$task_root/wiki-upstream-3.1.0}"
-output="${2:-$task_root/native-output}"
-release=3.1.0
-commit=49fb7d4f8228a3862db7ab5552caf2e587f0c16f
+checkout="${1:?Pass the candidate checkout path}"
+output="${2:?Pass the output directory}"
+commit="${3:?Pass the exact candidate commit SHA}"
+release_base=49fb7d4f8228a3862db7ab5552caf2e587f0c16f
+build_base=3f28e7dedf52d01be661e37d0298b7391d06facf
 
+# Pin the run to its triggering commit, not a moving branch or the original release alone.
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'Need a full candidate commit SHA.' >&2; exit 1; }
+release="3.1.0-image-links.${commit:0:12}"
 test "$(uname -s)" = Linux || { echo 'A native Linux builder is required.' >&2; exit 1; }
-node -e 'if (+process.versions.node.split(".")[0] !== 26) throw Error("Use Node.js 26.x")'
+node -e 'if (+process.versions.node.split(".")[0] !== 26 || process.arch !== "x64") throw Error("Use Node.js 26.x on Linux x64")'
 test "$(git -C "$checkout" rev-parse HEAD)" = "$commit" || {
-  echo "Check out the release commit $commit first; the fork need not have a release tag." >&2
-  exit 1
+  echo "Check out the candidate commit $commit first." >&2; exit 1;
+}
+git -C "$checkout" merge-base --is-ancestor "$build_base" "$commit" || {
+  echo "Candidate must include the confirmed 3.1 build base $build_base." >&2; exit 1;
 }
 test -z "$(git -C "$checkout" status --porcelain)" || {
   echo 'The source checkout must be clean.' >&2; exit 1;
@@ -21,14 +26,17 @@ test -z "$(git -C "$checkout" status --porcelain)" || {
 
 mkdir -p "$output"
 output="$(cd "$output" && pwd)"
-stage="$(mktemp -d "$output/.build-3.1.0.XXXXXX")"
+stage="$(mktemp -d "$output/.build-image-links.XXXXXX")"
+# Preserve diagnostic logs even if a regression test or compile fails.
+mkdir -p "$output/logs"
+trap 'cp "$stage/"*.log "$output/logs/" 2>/dev/null || true' EXIT
 mkdir "$stage/source"
 git -C "$checkout" archive "$commit" | tar -xf - -C "$stage/source"
 export npm_config_cache="$stage/npm-cache"
 export npm_config_audit=false
 export npm_config_fund=false
 
-# The release workflow stamps these two versions before compiling.
+# Distinguish this candidate from the installed official 3.1.0 package.
 node --input-type=module - "$stage/source" "$release" <<'JS'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -40,11 +48,11 @@ for (const workspace of ['frontend', 'backend']) {
 }
 JS
 
-(cd "$stage/source/frontend" && npm ci --ignore-scripts && npm run build) 2>&1 | tee "$stage/frontend.log"
+(cd "$stage/source/frontend" && npm ci --ignore-scripts && npm run visual:check:image-links && npm run build) 2>&1 | tee "$stage/frontend.log"
 (cd "$stage/source/blocks" && npm ci --ignore-scripts && npm run build) 2>&1 | tee "$stage/blocks.log"
 
 # Additional validation; TypeScript runs directly under Node, so there is no backend compile.
-(cd "$stage/source/backend" && npm ci --ignore-scripts && npm run typecheck) 2>&1 | tee "$stage/typecheck.log"
+(cd "$stage/source/backend" && npm ci --ignore-scripts && npm run typecheck && npm run visual:check:protocol) 2>&1 | tee "$stage/typecheck.log"
 
 dist="$stage/dist"
 mkdir -p "$dist/blocks" "$dist/backend"
@@ -76,12 +84,10 @@ test ! -e "$artifact" || { echo "Refusing to overwrite $artifact" >&2; exit 1; }
 tar -czf "$artifact" -C "$dist" .
 (cd "$output" && sha256sum "$(basename "$artifact")") > "$artifact.sha256"
 {
-  printf 'release=%s\ncommit=%s\nplatform=%s\n' "$release" "$commit" "$platform"
+  printf 'release=%s\ncommit=%s\nrelease_base=%s\nbuild_base=%s\nplatform=%s\n' "$release" "$commit" "$release_base" "$build_base" "$platform"
   node --version
   npm --version
   sha256sum "$stage/source/"{frontend,blocks,backend}/package-lock.json
   printf 'logs=%s\n' "$stage"
 } > "$artifact.build-info.txt"
-mkdir -p "$output/logs"
-cp "$stage/"*.log "$output/logs/"
 printf 'Built %s\nEvidence remains in %s\n' "$artifact" "$stage"

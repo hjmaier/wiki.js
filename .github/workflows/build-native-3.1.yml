@@ -1,9 +1,9 @@
-name: Build Wiki.js 3.1 native test package
+name: Build Wiki.js 3.1 image-link test package
 
 on:
-  # First run works on this separate branch without changing the fork's default branch.
+  # A later push runs only this isolated package test, without publishing a release.
   push:
-    branches: [hj-3.1-native-build]
+    branches: [hj-3.1-image-links-test]
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   build:
+    if: github.repository == 'hjmaier/wiki.js' && github.ref == 'refs/heads/hj-3.1-image-links-test'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -27,17 +28,11 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 12
 
     steps:
-      - name: Check out build tooling
+      - name: Check out the exact candidate that triggered this run
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          path: tooling
-          persist-credentials: false
-
-      - name: Check out exact release commit from our fork
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: hjmaier/wiki.js
-          ref: 49fb7d4f8228a3862db7ab5552caf2e587f0c16f
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           path: source
           persist-credentials: false
 
@@ -47,21 +42,23 @@ jobs:
           package-manager-cache: false
 
       - name: Compile, typecheck and package Linux x64
-        run: bash tooling/scripts/build-native-linux.sh "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/native-output"
+        run: bash source/scripts/build-native-linux.sh "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/native-output" "$GITHUB_SHA"
 
       - name: Start packaged application against fresh test database
         env:
           WIKI_TEST_DB_PORT: ${{ job.services.postgres.ports[5432] }}
         run: |
           mkdir "$RUNNER_TEMP/wiki-smoke"
-          tar -xzf native-output/wiki-js-3.1.0-linux-x64.tar.gz -C "$RUNNER_TEMP/wiki-smoke"
-          node tooling/scripts/smoke-wiki31.mjs "$RUNNER_TEMP/wiki-smoke" "$GITHUB_WORKSPACE/native-output/smoke.log"
+          packages=(native-output/*.tar.gz)
+          test "${#packages[@]}" -eq 1
+          tar -xzf "${packages[0]}" -C "$RUNNER_TEMP/wiki-smoke"
+          node source/scripts/smoke-wiki31.mjs "$RUNNER_TEMP/wiki-smoke" "$GITHUB_WORKSPACE/native-output/smoke.log"
 
       - name: Upload package, checksums and test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: wiki-js-3.1.0-linux-x64
+          name: wiki-js-3.1-image-links-${{ github.sha }}-linux-x64
           if-no-files-found: error
           retention-days: 14
           path: |
